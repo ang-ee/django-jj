@@ -1,0 +1,5 @@
+include README.md
+include LICENSE*
+recursive-include src/django_jj *.typed
+recursive-exclude * __pycache__ *.py[cod]
+prune src/django_jj.egg-info

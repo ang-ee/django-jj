@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14"]
+        django-version: ["6.0"]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: django_jj
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      JJ_TEST_DATABASE_NAME: django_jj
+      JJ_TEST_DATABASE_USER: postgres
+      JJ_TEST_DATABASE_PASSWORD: postgres
+      JJ_TEST_DATABASE_HOST: localhost
+      JJ_TEST_DATABASE_PORT: "5432"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: |
+          uv venv --python "${{ matrix.python-version }}"
+          uv pip install -e '.[dev,git]' "django==${{ matrix.django-version }}.*"
+      - name: Lint, format, types, and tests
+        run: make check

@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-jj"
+version = "0.1.0.dev0"
+description = "A Jujutsu (jj) repository store for Django: jj's objects and operation log as PostgreSQL rows, served to a thin jj client."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+authors = [{ name = "Angee, Inc.", email = "hi@angee.ai" }]
+keywords = ["django", "jujutsu", "jj", "vcs", "version-control", "postgresql"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Django",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Version Control",
+]
+dependencies = [
+    "django>=6.0,<6.1",
+]
+
+[project.optional-dependencies]
+# Git import/export (SPEC § 15).
+git = ["dulwich>=1.2"]
+dev = [
+    "pytest>=8.0",
+    "pytest-django>=4.8",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pyright>=1.1.350",
+    "django-stubs[compatible-mypy]>=6.0,<6.1",
+    "django-stubs-ext>=6.0,<6.1",
+    # PostgreSQL is required (SPEC § 5, invariant 10); tests run against it.
+    "psycopg[binary]>=3.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/ang-ee/django-jj"
+Documentation = "https://github.com/ang-ee/django-jj/tree/main/docs"
+Issues = "https://github.com/ang-ee/django-jj/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["django_jj*"]
+
+[tool.setuptools.package-data]
+django_jj = ["py.typed"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+python_files = ["test_*.py"]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:django.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Django Meta options (indexes, constraints, ordering, operations) are class-level
+# lists/tuples by framework convention.
+"src/django_jj/models/*.py" = ["RUF012"]
+"src/django_jj/migrations/*.py" = ["RUF012"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+plugins = ["mypy_django_plugin.main"]
+# Generated migrations use class-level ``dependencies`` / ``operations``.
+exclude = ["build/", ".*/migrations/.*"]
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[[tool.mypy.overrides]]
+module = ["dulwich.*"]
+ignore_missing_imports = true
+
+# Tests are type-checked, but without the "annotate every def" ceremony.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = true
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/migrations/**"]
+venvPath = "."
+venv = ".venv"
