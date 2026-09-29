@@ -95,7 +95,8 @@ in one transaction — **whatever the current head set is**. It refuses only for
 authentication, authorization, a missing operation/view, or an attempt to remove a head
 that is not an ancestor of the new operation (`SPEC § 8.1`). A compare-and-swap that
 fails because `old_ids` is stale is a bug: jj assumes "the operation cannot fail to
-commit". The one refusing CAS is the **publication** (`SPEC § 9`).
+commit". Lock waits and deadlocks inside it are retried, never surfaced. The one refusing
+CAS is the **publication** (`SPEC § 9`).
 
 ### 3. Canonical rows are insert-only
 
@@ -106,12 +107,13 @@ denormalizations, never a second source of truth.
 ### 4. jj-native ids, verified by the server, never rewritten
 
 Writers compute ids with jj's own hashing — the client with jj-lib itself, server-side
-writes with the Python port. The server **strictly decodes** (unknown, legacy and
-fallback-triggering fields are rejected, `SPEC § 6.2`) and recomputes the id of **every**
-uploaded object (even when the id already exists) and rejects mismatches; it never trusts a claimed id and
-never rewrites a value (committers are *verified*, not stamped — `SPEC § 6.5`). Stored ids
-are never rehashed. Golden vectors in `vectors/` are the authority for the hashing
-scheme; Python/jj-lib parity is load-bearing.
+writes with the Python port. The server **strictly decodes** every upload with its own
+wire parser and requires canonical bytes (`SPEC § 6.2`, `§ 6.7`), recomputes the id of
+every new object, requires a re-upload of an existing id to equal the stored value (proof
+of possession), and rejects mismatches; it never trusts a claimed id and never rewrites a
+value (the client stamps the committer before hashing; the server *verifies* it —
+`SPEC § 6.5`). Stored ids are never rehashed. Golden vectors in `vectors/` are the
+authority for the hashing scheme; Python/jj-lib parity is load-bearing.
 
 ### 5. No grants on content-addressed objects
 
@@ -126,7 +128,8 @@ there (or it is a leaf the actor wrote), and record a new placement — **includ
 descendant of a moved tree** — only if it passes the graft rules (`SPEC § 13.4`; "written
 by the actor" applies to leaves only). Skipping any of this lets a reader fetch restricted
 content under a permitted path — directly, or by wrapping a restricted subtree in a tree
-of their own.
+of their own. Decide readability before any lookup and report invisible references as
+missing: a response that depends on hidden state is an existence oracle.
 
 ### 7. Batch-only protocol
 
@@ -136,10 +139,11 @@ stores fail.
 
 ### 8. Derived data is rebuildable and off the write path
 
-Derivers run after the op-heads transaction commits, from `OpHeadLog`. Every derived
-table is reproducible by `manage.py jj rebuild`; tests assert incremental equals rebuild.
-**Don't** derive inside `update_op_heads`, a view, or a signal handler that runs before
-commit.
+Derivers run after the op-heads transaction commits, from `OpHeadLog` and
+`PublicationLog` — never in the transaction that logs the change, and never able to fail
+or roll back a write. Every derived table is reproducible by `manage.py jj rebuild` (built
+side by side, `SPEC § 11.5`); tests assert incremental equals rebuild. **Don't** derive
+inside `update_op_heads` or in a signal handler that runs before commit.
 
 ### 9. Determinism
 
@@ -160,6 +164,14 @@ The design relies on `bytea`, TOAST, transactional DDL, `SELECT … FOR UPDATE`,
 locks and recursive CTEs. `jj.E001` fails on any other backend. **Don't** add SQLite or
 MongoDB compatibility shims.
 
+### 12. No wedges
+
+jj clients fix ids locally and assume writes succeed, so a deterministic refusal of a
+journaled object is permanent for that client. Refuse only input the pinned jj writer
+never emits, unauthorized changes, and policy; constrain deprecated fields the writer
+still emits instead of rejecting them; keep the client's recovery path for permanently
+refused items working (`SPEC § 5`, `§ 6.3`).
+
 ---
 
 ## Standalone-ness rule
@@ -175,7 +187,9 @@ This package **must work in any Django project**:
 - **No `[tool.<framework>]` config** in `pyproject.toml`.
 
 Adapter points: `JJ_AUTHENTICATOR`, `JJ_AUTHORIZER`, `JJ_DERIVERS`, `JJ_FILE_STORAGE`,
-`JJ_WORKER_COMMAND`, and the `op_heads_updated` / `publication_moved` signals.
+`JJ_DIRECT_UPLOAD_ADAPTER`, `JJ_WORKER_ENABLED` / `JJ_WORKER_COMMAND`, the
+`django_jj.tasks.derive` task, and the `op_heads_updated` / `publication_moved` /
+`worker_requested` signals.
 Consumers depend on the library, never the reverse.
 
 ---
@@ -191,7 +205,7 @@ Reject scope creep. These belong elsewhere:
 - **Not a knowledge base or CMS** — hosts project repositories into those via derivers.
 - **Not a real-time editor** — no CRDT/OT.
 - **Not a jj fork** — the client is `jj-cli` + three store implementations + `init`,
-  `clone`, `publications`, `worker`.
+  `clone`, `publications`, `journal`, `worker`.
 
 If a request blurs one of these lines, the answer is "different package, not here".
 
@@ -222,7 +236,10 @@ seam resolution at import time — seams resolve lazily on first use.
 
 - Indexes and constraints ship in the migration that creates the table.
 - Every `RunSQL` has `reverse_sql`.
-- PostgreSQL-specific operations are fine (and expected).
+- PostgreSQL-specific operations are fine (and expected). `django.contrib.postgres` is a
+  required co-installed app (`bytea[]` columns).
+- Settle the canonical primary-key shape before the first migration (`SPEC § 22` Q14);
+  Django cannot migrate between key shapes later.
 
 ### Settings
 
@@ -243,16 +260,28 @@ See invariant 2. The test suite includes a race that must leave two heads, not a
 
 ### Don't hash the stored protobuf bytes
 Ids are jj `ContentHash` over the decoded value (files and symlinks: over raw bytes), so
-two valid encodings of one unsigned value get one id. Signed commits are the exception
-that proves the rule: the signature covers the exact bytes, so store `data` as uploaded.
-Use the port in `django_jj._internal`, checked by golden vectors.
+two valid encodings of one unsigned value get one id. Signed commits: jj signs, and
+verifies against, its own prost encoding of the unsigned commit (field 9 `secure_sig`
+precedes field 10 `conflict_labels`), so the port needs a prost-exact `Commit` encoder and
+uploads must be byte-canonical (`SPEC § 6.2`). Use the port in `django_jj._internal`,
+checked by golden vectors.
+
+### Don't validate uploads with a general protobuf runtime
+Python's protobuf runtime accepts inputs jj's decoder rejects (a known field with the
+wrong wire type, an overflowing ten-byte varint) and reports no unknown fields for them.
+Use the project's strict wire parser and the canonical-bytes check (`SPEC § 6.2`).
+
+### Don't refuse what the pinned writer emits
+jj 0.45.1 still writes `Commit.predecessors`, `Bookmark.remote_bookmarks` and
+`View.git_head`. Rejecting them wedges every client whose journal holds such an object;
+require them to equal their derived projection instead (`SPEC § 6.7`).
 
 ### Don't normalize trees into entry rows
 Trees are opaque rows. Queryable history comes from `ChangedPath`, which grows with
 changes rather than tree size × versions.
 
 ### Don't query per object
-Batch reads use `object_id = ANY(%s)` per kind. A loop of `.get()` calls in a protocol
+Batch reads use `object_id = ANY(%s::bytea[])` per kind. A loop of `.get()` calls in a protocol
 view is a bug.
 
 ### Don't write derived data in the request transaction
@@ -263,17 +292,36 @@ The client computes ids locally and caches what it wrote under them; a server-si
 would give one id two meanings. Verify (committer identity, references, placement) and
 refuse — never alter.
 
-### Don't judge merge operations against their parents alone
-A merge's value is inherited only if all parents agree, or it comes from a parent that
-changed it relative to the merge base (`SPEC § 8.4`). "Equals some parent" is not enough:
-pairing the current head with a fresh child of an old operation would roll protected refs
-back. Divergence is normally resolved server-side by the jj worker (`SPEC § 8.2`), so
-stock clients rarely write merges at all.
+### Don't attribute a merge's values to one parent
+In an operation with several parents, a value is inherited only if every parent has it and
+the operation keeps it; everything else is a change (`SPEC § 8.4`). jj folds N heads
+pairwise, in a client-controlled order, with a different base at each step, so
+base-relative attribution is forgeable: pairing the current head with a fresh child of an
+old operation rolls protected refs back. Merges are the worker's job (`SPEC § 8.2`).
+
+### Don't number log rows with a sequence
+`OpHeadLog.seq` and `PublicationLog.seq` come from the per-repository `LogCounter` under
+its row lock. A sequence value is assigned at insert, not at commit, so a watermark reader
+skips rows that commit late (`SPEC § 8.1`).
+
+### Don't back `lock()` with a blocking server lock
+jj takes it on every commit. It is a no-op guard unless the last head read was divergent;
+the server side is a non-blocking try-lock that the client polls briefly (`SPEC § 8.3`).
 
 ### Don't treat a returned id as uploaded
 The client returns ids before the server has the object. Journal every write, deduplicate
-only against acknowledged objects, upload by dependency level, and drain the journal
-before `op-heads:update` and on the next start (`SPEC § 6.3`).
+only against acknowledged objects, upload leaves eagerly and everything else as the
+topologically ordered closure of the head update — never as parallel batches that
+reference each other — and resume pending head updates on the next start (`SPEC § 6.3`).
+
+### Don't leak existence through statuses
+With path rules, answer about unreadable paths before any lookup, report references the
+actor cannot see exactly like missing ones, and never add a "which of these do you have"
+endpoint (`SPEC § 13.4`).
+
+### Don't read `request.body` in protocol views
+Django caps it at `DATA_UPLOAD_MAX_MEMORY_SIZE` (2.5 MB by default). Read with
+`request.read(n)` and enforce `JJ_MAX_REQUEST_BYTES` yourself (`SPEC § 12.1`).
 
 ### Don't authenticate from the session
 Protocol endpoints are CSRF-exempt because authenticators read the `Authorization` header
@@ -344,9 +392,9 @@ change on top) and run `jj git push -b <topic>` again. After the pull request me
 
 ## Open design questions tracked in the spec
 
-`docs/SPEC.md § 22` lists them (Q1–Q13: server-side jj semantics, id authority,
+`docs/SPEC.md § 22` lists them (Q1–Q14: server-side jj semantics, id authority,
 divergence resolution, wire format, large-file upload, garbage collection, name hiding,
 redaction, the `jj-core` split, an upstream remote protocol, API names, worker interface,
-read-only overlay). If a change touches one, resolve it
-with a spec update or note it as deferred. **Don't silently land a partial decision in
-code.**
+read-only overlay, canonical primary keys). Q4 and Q5 are settled in draft 3. If a change
+touches one, resolve it with a spec update or note it as deferred. **Don't silently land a
+partial decision in code.**

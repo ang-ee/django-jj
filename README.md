@@ -19,10 +19,10 @@ a Django app, and ships **`jj-django`** — stock `jj` built with store implemen
 that talk to that server.
 
 - **Real jj, shared.** People and agents run `jj new`, `describe`, `squash`, `log`,
-  `op log` and `undo` against one server-hosted repository. Concurrent commands never
-  lose work, and none is rejected because another landed first: jj's lock-free operation
-  log merges divergent operations, as it does locally. Ids are jj's own — computed by
-  the writer, verified by the server.
+  `op log` and `op revert` against one server-hosted repository. Concurrent commands never
+  lose work, and none is rejected because another landed first: divergent operations are
+  merged by jj itself — a server-side jj worker — as they would be locally. Ids are jj's
+  own — computed by the writer, verified by the server.
 - **Server-side writes.** Your application can edit files in a named jj workspace; each
   edit becomes a commit and an operation, exactly as if a client had made it. Conflicts
   are stored as data, not refused.
@@ -36,7 +36,7 @@ that talk to that server.
   names a path, so your authorization layer can grant access per repository,
   publication, workspace and path — including hiding the contents of `hr/` from readers
   of the rest of the repository (those readers work in a sparse checkout that excludes
-  it).
+  it). Path rules protect contents; commit and operation metadata stay repository-wide.
 
 ## How it works
 
@@ -56,6 +56,7 @@ that talk to that server.
 # settings.py
 INSTALLED_APPS = [
     ...,
+    "django.contrib.postgres",
     "django_jj",
 ]
 JJ_AUTHENTICATOR = "myproject.vcs.TokenAuthenticator"  # required; header tokens only
@@ -75,11 +76,11 @@ cd notes && echo "hello" > README.md && jj describe -m "first"
 ```
 
 ```python
-from django_jj import edit_workspace, publish
+from django_jj import Put, edit_workspace, publish
 
 result = edit_workspace(repo, actor, "web@alice",
-                        edits=[("docs/intro.md", b"# Intro\n")],
-                        description="Edit intro")
+                        edits=[Put("docs/intro.md", b"# Intro\n")],
+                        message="Edit intro", op_description="Edit intro")
 publish(repo, "site", result.commit_id, expected_version=3, actor=actor)
 ```
 
