@@ -312,6 +312,36 @@ The binary crate and tests talk to the adapter's own types so a pin move touches
 
 ---
 
+## Version control: jj
+
+The project stores jj repositories, and it is developed with jj. The repository is a
+**colocated jj + git repository** — `.jj/` sits beside `.git/` — so GitHub, CI and read-only
+git keep working.
+
+- **Use jj for every write:** `jj new`, `jj describe`, `jj commit`, `jj squash`,
+  `jj rebase`, `jj bookmark`, `jj git fetch`, `jj git push`. Read-only git (`log`, `show`,
+  `diff`, `blame`) is fine; don't `git commit`, `git checkout`, `git reset`, `git rebase` or
+  `git stash` here.
+- **One concern per change**, each with a description. Changes reach `main` through a
+  bookmark and a pull request.
+- **Never rewrite published history.** Commits on `main@origin` are immutable to jj; never
+  pass `--ignore-immutable`, and never push `main` backwards.
+
+```sh
+jj git fetch
+jj new main                       # start a change on the latest main
+# edit; jj snapshots the working copy on every command
+jj commit -m "<what changed>"     # seal it; @ becomes a new empty change
+jj bookmark create <topic> -r @-
+jj git push -b <topic>            # then open a pull request for <topic>
+```
+
+To revise a pushed topic, change it in place (`jj edit <change>`, or `jj squash` from a
+change on top) and run `jj git push -b <topic>` again. After the pull request merges,
+`jj git fetch` and start the next change with `jj new main`.
+
+---
+
 ## Open design questions tracked in the spec
 
 `docs/SPEC.md § 22` lists them (Q1–Q13: server-side jj semantics, id authority,

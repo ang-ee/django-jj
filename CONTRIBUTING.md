@@ -9,6 +9,7 @@ Read [AGENTS.md](./AGENTS.md) (or [CLAUDE.md](./CLAUDE.md)) and
 - Python 3.14+
 - `uv`
 - PostgreSQL 17 (required — the library does not support other databases)
+- [jj](https://github.com/jj-vcs/jj) (Jujutsu) 0.45 or later
 
 ```bash
 uv venv --python 3.14
@@ -35,7 +36,23 @@ From milestone M1 the Rust client lives in `client/`:
 
 Python 3.14 × Django 6.0 × PostgreSQL 17.
 
-## Commit hygiene
+## Version control
+
+The repository is a colocated jj + git repository, developed with jj. Clone it with
+`jj git clone --colocate https://github.com/ang-ee/django-jj.git`, or run
+`jj git init --colocate` in an existing git clone. Use jj for every write; the rules and
+the publish recipe are in [AGENTS.md](./AGENTS.md#version-control-jj). In short:
+
+```bash
+jj git fetch
+jj new main
+# edit
+jj commit -m "<what changed>"
+jj bookmark create <topic> -r @-
+jj git push -b <topic>            # then open a pull request
+```
+
+## Change hygiene
 
 - One concern per change; tests with every behaviour change.
 - Record breaking changes in `CHANGELOG.md`.
